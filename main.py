@@ -93,10 +93,27 @@ def download_chap(url):
     content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
     if not content: return None
     
-    # Xóa quảng cáo và các nút chức năng thừa
-    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form"]): 
+    # 1. Xóa các thẻ HTML thừa thãi
+    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav"]): 
         t.decompose()
         
+    # 2. Lọc và xóa sạch các đoạn văn chứa rác, nút chia sẻ, bản quyền editor
+    keywords_to_remove = [
+        "chia sẻ", "share", "thích", "đang tải", "có liên quan", 
+        "chương trước", "chương sau", "truyện chỉ đăng tại", "edit by"
+    ]
+    
+    for element in content.find_all(["div", "p", "span", "section"]):
+        text = element.get_text().strip().lower()
+        if not text:
+            continue
+        # Kiểm tra nếu đoạn văn chứa bất kỳ từ khóa rác nào ở trên
+        if any(kw in text for kw in keywords_to_remove):
+            element.decompose()
+        # Xóa các liên kết mạng xã hội độc lập (X, Facebook...)
+        elif text in ["x", "facebook", "twitter", "pinterest"]:
+            element.decompose()
+            
     return str(content)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -110,7 +127,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Không tìm thấy chương nào. Hãy kiểm tra lại đường dẫn bài viết tổng hợp.")
         return
 
-    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tiến hành tải...")
+    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tiến hành tải và lọc rác...")
 
     # Tải nội dung từng chương
     results = {}
@@ -168,7 +185,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_out, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Ảnh bìa & Mục lục chuẩn Kindle!"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Đã lọc sạch rác, có Ảnh bìa & Mục lục!"
         )
     
     await status.delete()
