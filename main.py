@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urljoin, urldefrag
 from bs4 import BeautifulSoup
 from ebooklib import epub
@@ -9,7 +10,27 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import requests
 
-# --- CẤU HÌNH ---
+# ============================================================
+# 🌐 WEB SERVER DUMMY CHO RENDER (BẮT BUỘC PHẢI CÓ)
+# ============================================================
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.wfile.write("Bot WordPress đang hoạt động!".encode('utf-8'))
+
+    def log_message(self, format, *args):
+        return
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    server.serve_forever()
+
+# ============================================================
+# ⚙️ CẤU HÌNH WORDPRESS BOT
+# ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"}
 session = requests.Session()
@@ -18,18 +39,21 @@ session.headers.update(HEADERS)
 def get_content(url):
     try:
         res = session.get(url, timeout=15)
-        return BeautifulSoup(res.text, "lxml")
-    except: return None
+        if res.status_code == 200:
+            return BeautifulSoup(res.text, "lxml")
+    except: 
+        pass
+    return None
 
-# --- XỬ LÝ WORDPRESS ---
 def get_chapters(url):
     soup = get_content(url)
     if not soup: return [], "Truyện"
     
-    # Lấy tiêu đề
-    title = soup.title.string.split('|')[0].strip() if soup.title else "Truyện WordPress"
+    title_el = soup.select_one("h1") or soup.title
+    title = title_el.get_text().strip() if title_el else "Truyện WordPress"
+    if "|" in title:
+        title = title.split('|')[0].strip()
     
-    # Tìm vùng chứa chương (WordPress thường dùng entry-content hoặc post-content)
     content_area = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
     
     chapters = []
@@ -37,22 +61,21 @@ def get_chapters(url):
         for a in content_area.find_all("a", href=True):
             href = urldefrag(urljoin(url, a.get("href")))[0]
             text = a.get_text().strip()
-            # Lọc link chương: Phải có từ khoá chương/hồi hoặc định dạng C+số
             if re.match(r"^(chương|chuong|hồi|quyển|c\s*\d+)", text, flags=re.I):
-                chapters.append({"name": text, "url": href})
+                # Tránh trùng lặp link
+                if not any(c['url'] == href for c in chapters):
+                    chapters.append({"name": text, "url": href})
     return chapters, title
 
 def download_chap(url):
     soup = get_content(url)
     if not soup: return None
-    # Tìm vùng nội dung chính
     content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
     if not content: return None
-    # Xoá rác
-    for t in content.find_all(["script", "style", "ins", "a", "button"]): t.decompose()
+    for t in content.find_all(["script", "style", "ins", "a", "button"]): 
+        t.decompose()
     return str(content)
 
-# --- TELEGRAM HANDLER ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url: return
@@ -66,15 +89,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải...")
 
-    # Tải nội dung
     results = {}
     for i, c in enumerate(chapters):
         results[i] = download_chap(c["url"])
-        if i % 10 == 0:
+        if i % 10 == 0 or i == len(chapters) - 1:
             pct = int((i / len(chapters)) * 100)
-            await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%...")
+            try:
+                await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%\n({i+1}/{len(chapters)})")
+            except:
+                pass
 
-    # Tạo EPUB
     book = epub.EpubBook()
     book.set_title(title)
     for i, c in enumerate(chapters):
@@ -86,13 +110,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
-    file_out = "truyen_wp.epub"
+    file_out = (re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Truyen_WP") + ".epub"
     epub.write_epub(file_out, book)
     
     await update.message.reply_document(document=open(file_out, "rb"), caption=f"✅ Xong! {title}")
     await status.delete()
+    if os.path.exists(file_out):
+        os.remove(file_out)
 
-if __name__ == "__main__":
+def main():
+    # Khởi động Web Server ngầm để Render nhận diện cổng mạng
+    threading.Thread(target=run_web_server, daemon=True).start()
+    
+    if not BOT_TOKEN:
+        print("❌ Thiếu BOT_TOKEN!")
+        return
+        
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
