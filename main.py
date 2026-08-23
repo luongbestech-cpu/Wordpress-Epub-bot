@@ -2,6 +2,10 @@ import asyncio
 import os
 import re
 import threading
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urljoin, urldefrag
 import requests
@@ -11,14 +15,14 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 # ============================================================
-# 🌐 WEB SERVER DUMMY CHO RENDER (GIỮ APP KHÔNG BỊ CRASH)
+# 🌐 WEB SERVER DUMMY CHO RENDER
 # ============================================================
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write("Bot WordPress đang hoạt động!".encode('utf-8'))
+        self.wfile.write("Bot WordPress & Leosansutu đang hoạt động!".encode('utf-8'))
 
     def log_message(self, format, *args):
         return
@@ -33,6 +37,12 @@ def run_web_server():
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_WORDPRESS") or os.getenv("BOT_TOKEN")
 
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SENDER_EMAIL = os.getenv("SENDER_EMAIL", "")       
+SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "") 
+KINDLE_EMAIL = os.getenv("KINDLE_EMAIL", "")       
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 }
@@ -42,7 +52,7 @@ session.headers.update(HEADERS)
 
 def get_content(url):
     try:
-        res = session.get(url, timeout=20)
+        res = session.get(url, timeout=25)
         if res.status_code == 200:
             return BeautifulSoup(res.text, "lxml")
     except Exception as e:
@@ -53,18 +63,19 @@ def get_chapters(url):
     soup = get_content(url)
     if not soup: return [], "Truyện", None
     
-    # Lấy tiêu đề truyện
-    title_el = soup.select_one("h1") or soup.title
+    # Lấy tiêu đề truyện từ thẻ H1 hoặc Title trang
+    title_el = soup.select_one("h1.entry-title") or soup.select_one("h1") or soup.title
     title = title_el.get_text().strip() if title_el else "Truyện WordPress"
     if "|" in title:
         title = title.split('|')[0].strip()
         
-    # Lấy ảnh bìa (ưu tiên og:image hoặc ảnh đầu tiên trong bài)
+    # Lấy ảnh bìa
     cover_url = None
     og_img = soup.find("meta", property="og:image")
     if og_img and og_img.get("content"):
         cover_url = og_img["content"]
         
+    # Mở rộng vùng tìm kiếm nội dung (hỗ trợ cả bài viết đơn hoặc trang danh mục mục lục)
     content_area = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article") or soup.body
     
     if not cover_url and content_area:
@@ -78,10 +89,10 @@ def get_chapters(url):
             href = urldefrag(urljoin(url, a.get("href")))[0]
             text = a.get_text().strip()
             
-            # Bộ lọc thông minh: nhận diện Số (01, 1), PN, NT (Ngoại truyện), Chương, Hồi...
-            is_chapter = re.match(r"^(\d+|PN\s*\d+|NT\s*\d+|chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+)", text, flags=re.IGNORECASE)
+            # Bộ lọc nhận diện tên chương linh hoạt hơn cho các nhà edit WordPress
+            is_chapter = re.match(r"^(\d+|chuong|chương|hồi|hoi|quyển|quyen|phần|phan|ngoại truyện|ngoai truyen|pn|nt|c\s*\d+)", text, flags=re.IGNORECASE)
             
-            if is_chapter:
+            if is_chapter and len(text) < 100:  # Tránh bắt nhầm các đoạn link dài dạng đoạn văn
                 if not any(c['url'] == href for c in chapters):
                     chapters.append({"name": text, "url": href})
                     
@@ -90,46 +101,70 @@ def get_chapters(url):
 def download_chap(url):
     soup = get_content(url)
     if not soup: return None
+    
     content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
     if not content: return None
     
-    # 1. Xóa các thẻ HTML thừa thãi
-    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav"]): 
+    # Xóa các thẻ HTML rác
+    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "comments"]): 
         t.decompose()
         
-    # 2. Lọc và xóa sạch các đoạn văn chứa rác, nút chia sẻ, bản quyền editor
+    # Các từ khóa chân trang / bản quyền / mạng xã hội thường gặp ở nhà WordPress
     keywords_to_remove = [
         "chia sẻ", "share", "thích", "đang tải", "có liên quan", 
-        "chương trước", "chương sau", "truyện chỉ đăng tại", "edit by"
+        "chương trước", "chương sau", "truyện chỉ đăng tại", "edit by",
+        "bấm để", "để lại bình luận", "thông báo", "mật khẩu", "gợi ý"
     ]
     
-    for element in content.find_all(["div", "p", "span", "section"]):
+    for element in content.find_all(["div", "p", "span", "section", "footer"]):
         text = element.get_text().strip().lower()
         if not text:
             continue
-        # Kiểm tra nếu đoạn văn chứa bất kỳ từ khóa rác nào ở trên
         if any(kw in text for kw in keywords_to_remove):
             element.decompose()
-        # Xóa các liên kết mạng xã hội độc lập (X, Facebook...)
-        elif text in ["x", "facebook", "twitter", "pinterest"]:
+        elif text in ["x", "facebook", "twitter", "pinterest", "tumblr"]:
             element.decompose()
             
     return str(content)
+
+def send_to_kindle_email(file_path, title):
+    if not SENDER_EMAIL or not SENDER_PASSWORD or not KINDLE_EMAIL:
+        return False, "Chưa cấu hình thông tin Email trên Render."
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = KINDLE_EMAIL
+        msg['Subject'] = f"Convert {title}"
+
+        msg.attach(MIMEText("Gửi file EPUB từ Bot tự động."))
+
+        with open(file_path, "rb") as f:
+            part = MIMEApplication(f.read(), Name=os.path.basename(file_path))
+            part.add_header('Content-Disposition', 'attachment', filename=os.path.basename(file_path))
+            msg.attach(part)
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.sendmail(SENDER_EMAIL, KINDLE_EMAIL, msg.as_string())
+        server.quit()
+        return True, "Đã gửi thành công vào Kindle!"
+    except Exception as e:
+        return False, f"Lỗi gửi Kindle: {str(e)}"
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url: return
     
-    status = await update.message.reply_text("⏳ Đang quét danh sách chương WordPress...")
+    status = await update.message.reply_text("⏳ Đang phân tích trang WordPress/Leosansutu...")
     chapters, title, cover_url = get_chapters(url[0])
     
     if not chapters:
-        await status.edit_text("❌ Không tìm thấy chương nào. Hãy kiểm tra lại đường dẫn bài viết tổng hợp.")
+        await status.edit_text("❌ Không tìm thấy chương nào. Hãy chắc chắn bạn gửi link trang mục lục hoặc bài tổng hợp truyện.")
         return
 
-    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tiến hành tải và lọc rác...")
+    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải dữ liệu...")
 
-    # Tải nội dung từng chương
     results = {}
     for i, c in enumerate(chapters):
         results[i] = download_chap(c["url"])
@@ -140,13 +175,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
 
-    # Tạo file EPUB chuẩn Kindle
     book = epub.EpubBook()
     book.set_identifier('wp_' + re.sub(r'\W+', '', title))
     book.set_title(title)
     book.set_language('vi')
 
-    # Thêm ảnh bìa (Cover Image)
     if cover_url:
         try:
             img_res = session.get(cover_url, timeout=15)
@@ -155,7 +188,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Lỗi tải ảnh bìa: {e}")
 
-    # Thêm nội dung các chương
     chapters_list = []
     for i, c in enumerate(chapters):
         if results.get(i):
@@ -168,32 +200,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Không tải được nội dung chương nào.")
         return
 
-    # Cấu hình Mục lục (TOC) & Luồng đọc (Spine)
     book.toc = tuple(chapters_list)
     book.spine = ['nav'] + chapters_list
 
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
 
-    # Xuất file
     safe_title = re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Truyen_WP"
     file_out = f"{safe_title}.epub"
     epub.write_epub(file_out, book)
 
-    # Gửi file cho người dùng qua Telegram
     await status.edit_text(f"⬆️ Đang gửi file EPUB...")
-    with open(file_out, "rb") as f:
-        await update.message.reply_document(
-            document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Đã lọc sạch rác, có Ảnh bìa & Mục lục!"
-        )
+    await update.message.reply_document(
+        document=open(file_out, "rb"), 
+        caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Lọc sạch rác WordPress!"
+    )
     
+    if KINDLE_EMAIL and SENDER_EMAIL:
+        success, msg_note = send_to_kindle_email(file_out, title)
+        await update.message.reply_text(f"📧 Trạng thái gửi Kindle: {msg_note}")
+
     await status.delete()
     if os.path.exists(file_out):
         os.remove(file_out)
 
 def main():
-    # Khởi động HTTP Server ngầm cho Render
     threading.Thread(target=run_web_server, daemon=True).start()
     
     if not BOT_TOKEN:
