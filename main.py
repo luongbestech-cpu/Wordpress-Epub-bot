@@ -15,7 +15,7 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 # ============================================================
-# 🌐 WEB SERVER DUMMY CHO RENDER
+# 🌐 WEB SERVER DUMMY CHO RENDER (ĐÃ THÊM DO_HEAD ĐỂ FIX LỖI UPTIMEROBOT)
 # ============================================================
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -23,6 +23,11 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
         self.wfile.write("Bot WordPress & Leosansutu đang hoạt động!".encode('utf-8'))
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
 
     def log_message(self, format, *args):
         return
@@ -39,9 +44,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN_WORDPRESS") or os.getenv("BOT_TOKEN")
 
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SENDER_EMAIL = os.getenv("SENDER_EMAIL", "")       
+SENDER_EMAIL = os.getenv("SENDER_EMAIL", "")        
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "") 
-KINDLE_EMAIL = os.getenv("KINDLE_EMAIL", "")       
+KINDLE_EMAIL = os.getenv("KINDLE_EMAIL", "")        
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -63,19 +68,16 @@ def get_chapters(url):
     soup = get_content(url)
     if not soup: return [], "Truyện", None
     
-    # Lấy tiêu đề truyện từ thẻ H1 hoặc Title trang
     title_el = soup.select_one("h1.entry-title") or soup.select_one("h1") or soup.title
     title = title_el.get_text().strip() if title_el else "Truyện WordPress"
     if "|" in title:
         title = title.split('|')[0].strip()
         
-    # Lấy ảnh bìa
     cover_url = None
     og_img = soup.find("meta", property="og:image")
     if og_img and og_img.get("content"):
         cover_url = og_img["content"]
         
-    # Mở rộng vùng tìm kiếm nội dung (hỗ trợ cả bài viết đơn hoặc trang danh mục mục lục)
     content_area = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article") or soup.body
     
     if not cover_url and content_area:
@@ -89,10 +91,9 @@ def get_chapters(url):
             href = urldefrag(urljoin(url, a.get("href")))[0]
             text = a.get_text().strip()
             
-            # Bộ lọc nhận diện tên chương linh hoạt hơn cho các nhà edit WordPress
             is_chapter = re.match(r"^(\d+|chuong|chương|hồi|hoi|quyển|quyen|phần|phan|ngoại truyện|ngoai truyen|pn|nt|c\s*\d+)", text, flags=re.IGNORECASE)
             
-            if is_chapter and len(text) < 100:  # Tránh bắt nhầm các đoạn link dài dạng đoạn văn
+            if is_chapter and len(text) < 100: 
                 if not any(c['url'] == href for c in chapters):
                     chapters.append({"name": text, "url": href})
                     
@@ -105,11 +106,9 @@ def download_chap(url):
     content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
     if not content: return None
     
-    # Xóa các thẻ HTML rác
     for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "comments"]): 
         t.decompose()
         
-    # Các từ khóa chân trang / bản quyền / mạng xã hội thường gặp ở nhà WordPress
     keywords_to_remove = [
         "chia sẻ", "share", "thích", "đang tải", "có liên quan", 
         "chương trước", "chương sau", "truyện chỉ đăng tại", "edit by",
