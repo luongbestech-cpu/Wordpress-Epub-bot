@@ -15,7 +15,7 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 # ============================================================
-# 🌐 WEB SERVER DUMMY CHO RENDER (ĐÃ THÊM DO_HEAD ĐỂ FIX LỖI UPTIMEROBOT)
+# 🌐 WEB SERVER DUMMY CHO RENDER
 # ============================================================
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -49,7 +49,8 @@ SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "")
 KINDLE_EMAIL = os.getenv("KINDLE_EMAIL", "")        
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Referer": "https://www.google.com/"
 }
 
 session = requests.Session()
@@ -73,17 +74,36 @@ def get_chapters(url):
     if "|" in title:
         title = title.split('|')[0].strip()
         
+    # --- CẢI TIẾN TÌM ẢNH BÌA LINH HOẠT HƠN ---
     cover_url = None
-    og_img = soup.find("meta", property="og:image")
-    if og_img and og_img.get("content"):
-        cover_url = og_img["content"]
-        
-    content_area = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article") or soup.body
     
-    if not cover_url and content_area:
-        first_img = content_area.find("img")
-        if first_img and first_img.get("src"):
-            cover_url = first_img["src"]
+    # 1. Thử tìm qua các thẻ meta Open Graph hoặc Twitter Card
+    for meta_prop in ["og:image", "twitter:image", "image"]:
+        meta_img = soup.find("meta", property=meta_prop) or soup.find("meta", attrs={"name": meta_prop})
+        if meta_img and meta_img.get("content"):
+            cover_url = meta_img["content"]
+            break
+            
+    # 2. Nếu vẫn chưa có, tìm ảnh đầu tiên xuất hiện trong khung nội dung chính (entry-content / post-content / article)
+    if not cover_url:
+        content_area = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article") or soup.body
+        if content_area:
+            first_img = content_area.find("img")
+            if first_img and first_img.get("src"):
+                cover_url = first_img["src"]
+                
+    # 3. Nếu vẫn không thấy, quét toàn bộ trang tìm ảnh lớn đầu tiên có đuôi ảnh hợp lệ
+    if not cover_url:
+        for img in soup.find_all("img"):
+            src = img.get("src", "")
+            if any(ext in src.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]) and not any(w in src.lower() for w in ["avatar", "icon", "logo", "emoji"]):
+                cover_url = src
+                break
+
+    if cover_url:
+        cover_url = urljoin(url, cover_url)
+
+    content_area = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article") or soup.body
 
     chapters = []
     if content_area:
@@ -106,11 +126,9 @@ def download_chap(url):
     content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
     if not content: return None, []
     
-    # 1. Xóa các thẻ HTML rác
     for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "comments"]): 
         t.decompose()
         
-    # 2. Xóa các đoạn văn chứa từ khóa quảng cáo/bản quyền
     keywords_to_remove = [
         "chia sẻ", "share", "thích", "đang tải", "có liên quan", 
         "chương trước", "chương sau", "truyện chỉ đăng tại", "edit by",
@@ -126,7 +144,6 @@ def download_chap(url):
         elif text in ["x", "facebook", "twitter", "pinterest", "tumblr"]:
             element.decompose()
             
-    # 3. Xử lý ảnh trong chương: Tải về nhúng trực tiếp, lỗi/trống -> tự động xóa bỏ hoàn toàn
     local_images = []
     img_counter = 0
     for img in content.find_all("img"):
@@ -145,15 +162,14 @@ def download_chap(url):
                     "content": img_res.content
                 })
                 img['src'] = img_filename
-                # Gọt bớt thuộc tính thừa để hiển thị đẹp trên Kindle
                 for attr in list(img.attrs):
                     if attr not in ['src', 'alt', 'title']:
                         del img[attr]
                 img_counter += 1
             else:
-                img.decompose() # Link ảnh lỗi -> xóa thẻ img để không để lại khoảng trắng
+                img.decompose()
         except:
-            img.decompose() # Lỗi kết nối -> xóa thẻ img
+            img.decompose()
 
     return str(content), local_images
 
@@ -210,13 +226,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     book.set_title(title)
     book.set_language('vi')
 
+    # --- CƠ CHẾ GẮN ẢNH BÌA AN TOÀN ---
     if cover_url:
         try:
+            print(f"Đang tải ảnh bìa từ: {cover_url}")
             img_res = session.get(cover_url, timeout=15)
             if img_res.status_code == 200:
                 book.set_cover("cover.jpg", img_res.content)
+                print("Đã thiết lập ảnh bìa thành công!")
+            else:
+                print(f"Không thể tải ảnh bìa, mã lỗi HTTP: {img_res.status_code}")
         except Exception as e:
-            print(f"Lỗi tải ảnh bìa: {e}")
+            print(f"Lỗi ngoại lệ khi tải ảnh bìa: {e}")
 
     chapters_list = []
     for i, c in enumerate(chapters):
@@ -224,7 +245,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chap_data and chap_data[0]:
             content_html, local_images = chap_data
             
-            # Đưa ảnh trong chương vào danh mục của sách EPUB
             for img_info in local_images:
                 img_item = epub.EpubItem(
                     file_name=img_info["file_name"],
@@ -255,7 +275,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status.edit_text(f"⬆️ Đang gửi file EPUB...")
     await update.message.reply_document(
         document=open(file_out, "rb"), 
-        caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Nhúng ảnh minh họa & Lọc sạch rác!"
+        caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Ảnh bìa & Nhúng ảnh minh họa đầy đủ!"
     )
     
     if KINDLE_EMAIL and SENDER_EMAIL:
