@@ -101,14 +101,16 @@ def get_chapters(url):
 
 def download_chap(url):
     soup = get_content(url)
-    if not soup: return None
+    if not soup: return None, []
     
     content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
-    if not content: return None
+    if not content: return None, []
     
+    # 1. Xóa các thẻ HTML rác
     for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "comments"]): 
         t.decompose()
         
+    # 2. Xóa các đoạn văn chứa từ khóa quảng cáo/bản quyền
     keywords_to_remove = [
         "chia sẻ", "share", "thích", "đang tải", "có liên quan", 
         "chương trước", "chương sau", "truyện chỉ đăng tại", "edit by",
@@ -124,7 +126,36 @@ def download_chap(url):
         elif text in ["x", "facebook", "twitter", "pinterest", "tumblr"]:
             element.decompose()
             
-    return str(content)
+    # 3. Xử lý ảnh trong chương: Tải về nhúng trực tiếp, lỗi/trống -> tự động xóa bỏ hoàn toàn
+    local_images = []
+    img_counter = 0
+    for img in content.find_all("img"):
+        img_src = img.get("src")
+        if not img_src:
+            img.decompose()
+            continue
+        
+        full_img_url = urljoin(url, img_src)
+        try:
+            img_res = session.get(full_img_url, timeout=10)
+            if img_res.status_code == 200:
+                img_filename = f"images/chap_img_{id(img)}_{img_counter}.jpg"
+                local_images.append({
+                    "file_name": img_filename,
+                    "content": img_res.content
+                })
+                img['src'] = img_filename
+                # Gọt bớt thuộc tính thừa để hiển thị đẹp trên Kindle
+                for attr in list(img.attrs):
+                    if attr not in ['src', 'alt', 'title']:
+                        del img[attr]
+                img_counter += 1
+            else:
+                img.decompose() # Link ảnh lỗi -> xóa thẻ img để không để lại khoảng trắng
+        except:
+            img.decompose() # Lỗi kết nối -> xóa thẻ img
+
+    return str(content), local_images
 
 def send_to_kindle_email(file_path, title):
     if not SENDER_EMAIL or not SENDER_PASSWORD or not KINDLE_EMAIL:
@@ -162,7 +193,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Không tìm thấy chương nào. Hãy chắc chắn bạn gửi link trang mục lục hoặc bài tổng hợp truyện.")
         return
 
-    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải dữ liệu...")
+    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải dữ liệu & xử lý ảnh...")
 
     results = {}
     for i, c in enumerate(chapters):
@@ -189,9 +220,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chapters_list = []
     for i, c in enumerate(chapters):
-        if results.get(i):
+        chap_data = results.get(i)
+        if chap_data and chap_data[0]:
+            content_html, local_images = chap_data
+            
+            # Đưa ảnh trong chương vào danh mục của sách EPUB
+            for img_info in local_images:
+                img_item = epub.EpubItem(
+                    file_name=img_info["file_name"],
+                    media_type="image/jpeg",
+                    content=img_info["content"]
+                )
+                book.add_item(img_item)
+
             chap = epub.EpubHtml(title=c["name"], file_name=f"chap_{i+1}.xhtml")
-            chap.content = f"<h2>{c['name']}</h2>{results[i]}"
+            chap.content = f"<h2>{c['name']}</h2>{content_html}"
             book.add_item(chap)
             chapters_list.append(chap)
 
@@ -212,7 +255,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status.edit_text(f"⬆️ Đang gửi file EPUB...")
     await update.message.reply_document(
         document=open(file_out, "rb"), 
-        caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Lọc sạch rác WordPress!"
+        caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Nhúng ảnh minh họa & Lọc sạch rác!"
     )
     
     if KINDLE_EMAIL and SENDER_EMAIL:
