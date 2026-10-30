@@ -138,13 +138,165 @@ def download_chap(url):
                         for element in list(p_content.children):
                             content.append(element)
 
-    # Dọn dẹp rác hệ thống
+    # Dọn dẹp rác hệ thống kỹ thuật thuần túy
     trash_selectors = [
         "script", "style", "ins", "button", "iframe", "form", "nav", "comments",
         ".sharedaddy", ".jp-relatedposts", ".social-share", ".post-navigation", ".relate-post", ".page-links", ".post-pagination"
     ]
     for t in content.select(", ".join(trash_selectors)):
         t.decompose()
+            
+    local_images = []
+    img_counter = 0
+    for img in content.find_all("img"):
+        img_src = img.get("src")
+        if not img_src:
+            img.decompose()
+            continue
         
-    # Từ khóa rác an toàn tuyệt đối
-    keywords_pattern = r"\b(chia sẻ
+        full_img_url = urljoin(url, img_src)
+        try:
+            img_res = session.get(full_img_url, timeout=10)
+            if img_res.status_code == 200:
+                img_filename = f"images/chap_img_{id(img)}_{img_counter}.jpg"
+                local_images.append({
+                    "file_name": img_filename,
+                    "content": img_res.content
+                })
+                img['src'] = img_filename
+                for attr in list(img.attrs):
+                    if attr not in ['src', 'alt', 'title']:
+                        del img[attr]
+                img_counter += 1
+            else:
+                img.decompose()
+        except:
+            img.decompose()
+
+    return str(content), local_images
+
+def send_to_kindle_email(file_path, title):
+    if not SENDER_EMAIL or not SENDER_PASSWORD or not KINDLE_EMAIL:
+        return False, "Chưa cấu hình thông tin Email trên Render."
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = KINDLE_EMAIL
+        msg['Subject'] = f"Convert {title}"
+
+        msg.attach(MIMEText("Gửi file EPUB từ Bot tự động."))
+
+        with open(file_path, "rb") as f:
+            part = MIMEApplication(f.read(), Name=os.path.basename(file_path))
+            part.add_header('Content-Disposition', 'attachment', filename=os.path.basename(file_path))
+            msg.attach(part)
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.sendmail(SENDER_EMAIL, KINDLE_EMAIL, msg.as_string())
+        server.quit()
+        return True, "Đã gửi thành công vào Kindle!"
+    except Exception as e:
+        return False, f"Lỗi gửi Kindle: {str(e)}"
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = re.findall(r"https?://[^\s]+", update.message.text or "")
+    if not url: return
+    
+    status = await update.message.reply_text("⏳ Đang phân tích trang WordPress/Leosansutu...")
+    chapters, title, cover_url = get_chapters(url[0])
+    
+    if not chapters:
+        await status.edit_text("❌ Không tìm thấy chương nào. Hãy chắc chắn bạn gửi link trang mục lục hoặc bài tổng hợp truyện.")
+        return
+
+    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải dữ liệu & xử lý ảnh...")
+
+    results = {}
+    for i, c in enumerate(chapters):
+        results[i] = download_chap(c["url"])
+        if i % 10 == 0 or i == len(chapters) - 1:
+            pct = int(((i + 1) / len(chapters)) * 100)
+            try:
+                await status.edit_text(f"📚 {title}\n⏳ Đang tải nội dung: {pct}%\n({i+1}/{len(chapters)})")
+            except:
+                pass
+
+    book = epub.EpubBook()
+    book.set_identifier('wp_' + re.sub(r'\W+', '', title))
+    book.set_title(title)
+    book.set_language('vi')
+
+    if cover_url:
+        try:
+            print(f"Đang tải ảnh bìa từ: {cover_url}")
+            img_res = session.get(cover_url, timeout=15)
+            if img_res.status_code == 200:
+                book.set_cover("cover.jpg", img_res.content)
+                print("Đã thiết lập ảnh bìa thành công!")
+            else:
+                print(f"Không thể tải ảnh bìa, mã lỗi HTTP: {img_res.status_code}")
+        except Exception as e:
+            print(f"Lỗi ngoại lệ khi tải ảnh bìa: {e}")
+
+    chapters_list = []
+    for i, c in enumerate(chapters):
+        chap_data = results.get(i)
+        if chap_data and chap_data[0]:
+            content_html, local_images = chap_data
+            
+            for img_info in local_images:
+                img_item = epub.EpubItem(
+                    file_name=img_info["file_name"],
+                    media_type="image/jpeg",
+                    content=img_info["content"]
+                )
+                book.add_item(img_item)
+
+            chap = epub.EpubHtml(title=c["name"], file_name=f"chap_{i+1}.xhtml")
+            chap.content = f"<h2>{c['name']}</h2>{content_html}"
+            book.add_item(chap)
+            chapters_list.append(chap)
+
+    if not chapters_list:
+        await status.edit_text("❌ Không tải được nội dung chương nào.")
+        return
+
+    book.toc = tuple(chapters_list)
+    book.spine = ['nav'] + chapters_list
+
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+
+    safe_title = re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Truyen_WP"
+    file_out = f"{safe_title}.epub"
+    epub.write_epub(file_out, book)
+
+    await status.edit_text(f"⬆️ Đang gửi file EPUB...")
+    await update.message.reply_document(
+        document=open(file_out, "rb"), 
+        caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Ảnh bìa & Nhúng ảnh minh họa đầy đủ!"
+    )
+    
+    if KINDLE_EMAIL and SENDER_EMAIL:
+        success, msg_note = send_to_kindle_email(file_out, title)
+        await update.message.reply_text(f"📧 Trạng thái gửi Kindle: {msg_note}")
+
+    await status.delete()
+    if os.path.exists(file_out):
+        os.remove(file_out)
+
+def main():
+    threading.Thread(target=run_web_server, daemon=True).start()
+    
+    if not BOT_TOKEN:
+        print("❌ Lỗi: Thiếu BOT_TOKEN trong Environment Variables!")
+        return
+        
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
