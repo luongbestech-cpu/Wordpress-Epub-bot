@@ -138,7 +138,7 @@ def download_chap(url):
                         for element in list(p_content.children):
                             content.append(element)
 
-    # Dọn dẹp rác hệ thống (Chỉ giữ lại các thẻ rác thuần kỹ thuật, loại bỏ hoàn toàn các từ dễ trùng với nội dung truyện)
+    # Dọn dẹp rác hệ thống
     trash_selectors = [
         "script", "style", "ins", "button", "iframe", "form", "nav", "comments",
         ".sharedaddy", ".jp-relatedposts", ".social-share", ".post-navigation", ".relate-post", ".page-links", ".post-pagination"
@@ -146,68 +146,5 @@ def download_chap(url):
     for t in content.select(", ".join(trash_selectors)):
         t.decompose()
         
-    # Từ khóa rác an toàn tuyệt đối, không chứa từ dễ nhầm với hội thoại (như "thích" hay "giải thích")
-    keywords_pattern = r"\b(chia sẻ|share|đang tải|có liên quan|chương trước|chương sau|truyện chỉ đăng tại|edit by|bấm để|để lại bình luận|thông báo|mật khẩu)\b"
-    
-    for p in content.find_all("p"):
-        text = p.get_text().strip().lower()
-        if not text:
-            continue
-        if len(text) < 100 and re.search(keywords_pattern, text):
-            p.decompose()
-            
-    local_images = []
-    img_counter = 0
-    for img in content.find_all("img"):
-        img_src = img.get("src")
-        if not img_src:
-            img.decompose()
-            continue
-        
-        full_img_url = urljoin(url, img_src)
-        try:
-            img_res = session.get(full_img_url, timeout=10)
-            if img_res.status_code == 200:
-                img_filename = f"images/chap_img_{id(img)}_{img_counter}.jpg"
-                local_images.append({
-                    "file_name": img_filename,
-                    "content": img_res.content
-                })
-                img['src'] = img_filename
-                for attr in list(img.attrs):
-                    if attr not in ['src', 'alt', 'title']:
-                        del img[attr]
-                img_counter += 1
-            else:
-                img.decompose()
-        except:
-            img.decompose()
-
-    return str(content), local_images
-
-def send_to_kindle_email(file_path, title):
-    if not SENDER_EMAIL or not SENDER_PASSWORD or not KINDLE_EMAIL:
-        return False, "Chưa cấu hình thông tin Email trên Render."
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = KINDLE_EMAIL
-        msg['Subject'] = f"Convert {title}"
-
-        msg.attach(MIMEText("Gửi file EPUB từ Bot tự động."))
-
-        with open(file_path, "rb") as f:
-            part = MIMEApplication(f.read(), Name=os.path.basename(file_path))
-            part.add_header('Content-Disposition', 'attachment', filename=os.path.basename(file_path))
-            msg.attach(part)
-
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.sendmail(SENDER_EMAIL, KINDLE_EMAIL, msg.as_string())
-        server.quit()
-        return True, "Đã gửi thành công vào Kindle!"
-    except Exception as e:
-        return False, f"Lỗi gửi Kindle: {str(e)}"
-
-async def handle_message(update: Update, context: ContextTypes
+    # Từ khóa rác an toàn tuyệt đối
+    keywords_pattern = r"\b(chia sẻ
