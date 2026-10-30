@@ -84,7 +84,7 @@ def get_chapters(url):
             cover_url = meta_img["content"]
             break
             
-    # 2. Nếu vẫn chưa có, tìm ảnh đầu tiên xuất hiện trong khung nội dung chính (entry-content / post-content / article)
+    # 2. Nếu vẫn chưa có, tìm ảnh đầu tiên xuất hiện trong khung nội dung chính
     if not cover_url:
         content_area = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article") or soup.body
         if content_area:
@@ -126,7 +126,12 @@ def download_chap(url):
     content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
     if not content: return None, []
     
-    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "comments"]): 
+    # Xóa các thẻ rác hệ thống / class rác WordPress
+    trash_selectors = [
+        "script", "style", "ins", "button", "iframe", "form", "nav", "comments",
+        ".sharedaddy", ".jp-relatedposts", ".social-share", ".post-navigation", ".relate-post"
+    ]
+    for t in content.select(", ".join(trash_selectors)):
         t.decompose()
         
     keywords_to_remove = [
@@ -135,14 +140,13 @@ def download_chap(url):
         "bấm để", "để lại bình luận", "thông báo", "mật khẩu", "gợi ý"
     ]
     
-    for element in content.find_all(["div", "p", "span", "section", "footer"]):
-        text = element.get_text().strip().lower()
+    # 🛠️ CHỈ QUÉT THẺ <P> ĐỂ TRÁNH XÓA NHẦM KHỐI DIV/SECTION CHỨA NỘI DUNG TRUYỆN
+    for p in content.find_all("p"):
+        text = p.get_text().strip().lower()
         if not text:
             continue
-        if any(kw in text for kw in keywords_to_remove):
-            element.decompose()
-        elif text in ["x", "facebook", "twitter", "pinterest", "tumblr"]:
-            element.decompose()
+        if len(text) < 150 and any(kw in text for kw in keywords_to_remove):
+            p.decompose()
             
     local_images = []
     img_counter = 0
